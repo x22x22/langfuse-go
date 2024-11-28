@@ -22,7 +22,7 @@ type Langfuse struct {
 }
 
 func New(ctx context.Context) *Langfuse {
-	client := api.New()
+	client := api.GetInstance()
 
 	l := &Langfuse{
 		flushInterval: defaultFlushInterval,
