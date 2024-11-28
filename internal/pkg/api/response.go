@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-
-	"github.com/henomis/restclientgo"
 )
 
 type Response struct {
@@ -48,16 +46,8 @@ func (r *Response) SetBody(body io.Reader) error {
 	return nil
 }
 
-func (r *Response) AcceptContentType() string {
-	return ContentTypeJSON
-}
-
 func (r *Response) Decode(body io.Reader) error {
 	return json.NewDecoder(body).Decode(r)
-}
-
-func (r *Response) SetHeaders(_ restclientgo.Headers) error {
-	return nil
 }
 
 type IngestionResponse struct {
