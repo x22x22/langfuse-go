@@ -40,11 +40,16 @@ func (h *handler[T]) withTick(period time.Duration) *handler[T] {
 
 func (h *handler[T]) listen(ctx context.Context) {
 	ticker := time.NewTicker(h.tickerPeriod)
+	defer ticker.Stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			// Context被取消，优雅退出
+			h.handle(ctx) // 最后一次处理
+			return
 		case <-ticker.C:
-			go h.handle(ctx)
+			h.handle(ctx) // 移除go关键字，避免创建过多goroutine
 		case cmd, ok := <-h.commandCh:
 			if !ok {
 				return
@@ -52,8 +57,7 @@ func (h *handler[T]) listen(ctx context.Context) {
 
 			h.handle(ctx)
 			if cmd == commandFlushAndWait {
-				ticker.Stop()
-				close(h.commandCh)
+				return // 直接返回，ticker已经在defer中停止
 			}
 		}
 	}
@@ -68,6 +72,10 @@ func (h *handler[T]) flush() {
 }
 
 func (h *handler[T]) flushAndWait() {
-	h.commandCh <- commandFlushAndWait
-	<-h.commandCh
+	done := make(chan struct{})
+	go func() {
+		h.commandCh <- commandFlushAndWait
+		close(done)
+	}()
+	<-done
 }

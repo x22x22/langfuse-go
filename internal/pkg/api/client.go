@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +17,10 @@ import (
 
 const (
 	langfuseDefaultEndpoint = "https://cloud.langfuse.com"
+	maxRetries              = 3
+	baseRetryDelay          = 1 * time.Second
+	maxRetryDelay           = 30 * time.Second
+	requestTimeout          = 10 * time.Second
 )
 
 var (
@@ -79,7 +85,9 @@ func newClient() *Client {
 }
 
 func (c *Client) Ingestion(ctx context.Context, req *Ingestion, res *IngestionResponse) error {
-	// 打印 httpClient 的内存地址
+	// 添加请求超时
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
 
 	// 序列化请求体
 	jsonData, err := json.Marshal(req)
@@ -87,43 +95,99 @@ func (c *Client) Ingestion(ctx context.Context, req *Ingestion, res *IngestionRe
 		return err
 	}
 
-	// 创建请求
-	httpReq, err := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		c.baseURL+"/api/public/ingestion",
-		bytes.NewReader(jsonData),
-	)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// 检查context是否已取消
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// 创建请求
+		httpReq, err := http.NewRequestWithContext(
+			ctx,
+			"POST",
+			c.baseURL+"/api/public/ingestion",
+			bytes.NewReader(jsonData),
+		)
+		if err != nil {
+			return err
+		}
+
+		// 设置请求头
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", c.auth)
+
+		// 发送请求
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				// 计算退避延迟
+				delay := time.Duration(math.Pow(2, float64(attempt))) * baseRetryDelay
+				if delay > maxRetryDelay {
+					delay = maxRetryDelay
+				}
+
+				// 等待退避时间
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			continue
+		}
+
+		// 读取响应体
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				continue
+			}
+			return err
+		}
+
+		// 设置响应状态码
+		res.Code = resp.StatusCode
+
+		// 设置原始响应体
+		rawBody := string(body)
+		res.RawBody = &rawBody
+
+		// 检查HTTP状态码
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// 成功响应，解析并返回
+			return json.Unmarshal(body, res)
+		} else if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			// 客户端错误，不重试
+			return fmt.Errorf("client error: status %d, body: %s", resp.StatusCode, string(body))
+		}
+
+		// 服务器错误，继续重试
+		lastErr = fmt.Errorf("server error: status %d, body: %s", resp.StatusCode, string(body))
+		if attempt < maxRetries {
+			// 计算退避延迟
+			delay := time.Duration(math.Pow(2, float64(attempt))) * baseRetryDelay
+			if delay > maxRetryDelay {
+				delay = maxRetryDelay
+			}
+
+			// 等待退避时间
+			select {
+			case <-time.After(delay):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 	}
 
-	// 设置请求头
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", c.auth)
-
-	// 发送请求
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	// 设置响应状态码
-	res.Code = resp.StatusCode
-
-	// 设置原始响应体
-	rawBody := string(body)
-	res.RawBody = &rawBody
-
-	// 解析响应体
-	return json.Unmarshal(body, res)
+	return lastErr
 }
 
 func basicAuth(publicKey, secretKey string) string {
