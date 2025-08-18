@@ -20,7 +20,7 @@ const (
 	maxRetries              = 3
 	baseRetryDelay          = 1 * time.Second
 	maxRetryDelay           = 30 * time.Second
-	requestTimeout          = 10 * time.Second
+	requestTimeout          = 30 * time.Second // 增加到30秒，适应长请求
 )
 
 var (

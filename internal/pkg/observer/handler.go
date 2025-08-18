@@ -14,13 +14,14 @@ const (
 )
 
 const (
-	defaultTickerPeriod = 1 * time.Second
+	defaultTickerPeriod = 500 * time.Millisecond // 与flush间隔匹配，提高效率
 )
 
 type handler[T any] struct {
 	queue        *queue[T]
 	fn           EventHandler[T]
 	commandCh    chan command
+	doneCh       chan struct{}
 	tickerPeriod time.Duration
 }
 
@@ -28,7 +29,8 @@ func newHandler[T any](queue *queue[T], fn EventHandler[T]) *handler[T] {
 	return &handler[T]{
 		queue:        queue,
 		fn:           fn,
-		commandCh:    make(chan command),
+		commandCh:    make(chan command, 2),  // 缓冲2个命令，避免阻塞
+		doneCh:       make(chan struct{}, 1), // 缓冲1个完成信号
 		tickerPeriod: defaultTickerPeriod,
 	}
 }
@@ -57,25 +59,49 @@ func (h *handler[T]) listen(ctx context.Context) {
 
 			h.handle(ctx)
 			if cmd == commandFlushAndWait {
-				return // 直接返回，ticker已经在defer中停止
+				// 发送完成信号，但不退出handler
+				select {
+				case h.doneCh <- struct{}{}:
+				default:
+					// 如果doneCh满了，不阻塞
+				}
 			}
 		}
 	}
 }
 
 func (h *handler[T]) handle(ctx context.Context) {
-	h.fn(ctx, h.queue.All())
+	events := h.queue.All()
+	if len(events) > 0 {
+		h.fn(ctx, events)
+	}
 }
 
 func (h *handler[T]) flush() {
-	h.commandCh <- commanFlush
+	// 尝试发送flush命令，有缓冲区应该不会阻塞
+	select {
+	case h.commandCh <- commanFlush:
+		// 发送成功
+	case <-time.After(10 * time.Millisecond):
+		// 极少情况下的超时保护
+	}
 }
 
 func (h *handler[T]) flushAndWait() {
-	done := make(chan struct{})
-	go func() {
-		h.commandCh <- commandFlushAndWait
-		close(done)
-	}()
-	<-done
+	// 发送flushAndWait命令，使用超时避免永久阻塞
+	timeout := time.NewTimer(100 * time.Millisecond)
+	defer timeout.Stop()
+
+	select {
+	case h.commandCh <- commandFlushAndWait:
+		// 命令发送成功，等待处理完成（带超时）
+		select {
+		case <-h.doneCh:
+			// 正常完成
+		case <-time.After(200 * time.Millisecond):
+			// 超时，避免长时间等待
+		}
+	case <-timeout.C:
+		// 发送命令超时，直接返回
+	}
 }
